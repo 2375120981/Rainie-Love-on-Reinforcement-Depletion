@@ -1,0 +1,27 @@
+# Generated packages, local audio and temporary files.
+/release/
+/build/
+/assets/audio/
+*.zip
+*.mp3
+*.wav
+*.ogg
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+
+# Third-party research checkouts, private logs and captured process memory.
+/research/
+*.log
+*.bin
+*.hd2snap
+
+# Historical prototypes retained locally; not part of the v0.2.9 runtime.
+/src/mci_audio.lua
+/src/state_machine.lua
+/src/rainie_love_probe.lua
+/tests/test_state_machine.lua
+/tools/build_probe.py
+/tools/inspect_vehicle_seat.py

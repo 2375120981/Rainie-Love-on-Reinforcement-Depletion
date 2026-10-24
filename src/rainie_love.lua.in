@@ -1,0 +1,439 @@
+-- HD2-Addon: mods/c09nat/rainie_love_on_reinforcement_depletion
+-- Rainie Love on Reinforcement Depletion v0.2.9
+
+local KEY = "__C09NAT_RAINIE_LOVE"
+if rawget(_G, KEY) then return rawget(_G, KEY) end
+local sr = rawget(_G, "stingray")
+local loader = rawget(_G, "CowboyBingusModLoader")
+local old_update = rawget(_G, "update")
+local old_shutdown = rawget(_G, "shutdown")
+local M = { version = "0.2.9", active = false, playing = false }
+rawset(_G, KEY, M)
+if type(sr) ~= "table" or type(loader) ~= "table" or loader.api ~= 1 or
+   type(old_update) ~= "function" then
+  M.reason = "Bingus Shared Loader v15+ / API 1 required"
+  return M
+end
+
+local function call(fn, ...)
+  if type(fn) ~= "function" then return nil end
+  local ok, a, b = pcall(fn, ...)
+  if ok then return a, b end
+  return nil
+end
+local MissionBoundary = (function()
+__MISSION_BOUNDARY__
+end)()
+local boundary = MissionBoundary.new()
+local log = type(loader.open_log) == "function" and
+            call(loader.open_log, "RainieLove.log") or nil
+local function report(text)
+  local line = os.date("!%Y-%m-%dT%H:%M:%SZ") .. " " .. text
+  if log then pcall(function() log:write(line .. "\n"); log:flush() end) end
+  print("[RainieLove] " .. text)
+end
+
+local ok, runtime = pcall(function()
+  local ffi = require("ffi")
+  ffi.cdef [[
+    typedef unsigned char RLM_u8; typedef unsigned int RLM_u32;
+    typedef unsigned long long RLM_u64;
+    void *GetModuleHandleA(const char *name); void *GetCurrentProcess(void);
+    int ReadProcessMemory(void *, const void *, void *, size_t, size_t *);
+    unsigned long GetEnvironmentVariableA(const char *, char *, unsigned long);
+    int CreateDirectoryA(const char *, void *);
+    unsigned long GetFileAttributesA(const char *);
+    unsigned long __stdcall mciSendStringW(const wchar_t *, wchar_t *,
+                                            unsigned int, void *);
+  ]]
+  local kernel, winmm = ffi.load("kernel32"), ffi.load("winmm")
+  local process, module = kernel.GetCurrentProcess(), kernel.GetModuleHandleA("game.dll")
+  assert(module ~= nil and module ~= ffi.NULL, "game.dll unavailable")
+  local base = tonumber(ffi.cast("RLM_u64", module))
+  local function read(address, size)
+    local out, got = ffi.new("RLM_u8[?]", size), ffi.new("size_t[1]")
+    if kernel.ReadProcessMemory(process, ffi.cast("const void *", address),
+       out, size, got) == 0 or tonumber(got[0]) ~= size then return nil end
+    return ffi.string(out, size)
+  end
+  local function u32(blob, at)
+    if not blob or #blob < at + 4 then return nil end
+    local v = ffi.new("RLM_u32[1]"); ffi.copy(v, blob:sub(at + 1, at + 4), 4)
+    return tonumber(v[0])
+  end
+  local function pointer(blob, at)
+    if not blob or #blob < at + 8 then return nil end
+    local v = ffi.new("RLM_u64[1]"); ffi.copy(v, blob:sub(at + 1, at + 8), 8)
+    local n = tonumber(v[0])
+    return n and n >= 0x10000 and n < 0x800000000000 and n or nil
+  end
+  local dos = read(base, 0x200)
+  local pe = dos and u32(dos, 0x3c)
+  local header = pe and read(base + pe, 0x100) or nil
+  assert(header and u32(header, 8) == 0x6ab3b43f and
+         u32(header, 80) == 0x04744000, "unsupported game.dll build")
+  local function global(rva) return pointer(read(base + rva, 8), 0) end
+  local function masked(x, mask)
+    local out, place = 0, 1
+    while mask > 0 and x > 0 do
+      if mask % 2 == 1 and x % 2 == 1 then out = out + place end
+      x, mask, place = math.floor(x / 2), math.floor(mask / 2), place * 2
+    end
+    return out
+  end
+  local function lookup(at, key)
+    local h = read(at, 20)
+    local rows = pointer(h, 0)
+    local capacity, empty, mult = u32(h, 8), u32(h, 12), u32(h, 16)
+    if not rows or not capacity or capacity == 0 or capacity > 0x100000 or
+       not empty or not mult then return nil end
+    local product = ffi.new("RLM_u64", key) * ffi.new("RLM_u64", mult)
+    local seed = tonumber(ffi.cast("RLM_u32", product))
+    for probe = 0, capacity - 1 do
+      local row = read(rows + masked(seed + probe, capacity - 1) * 8, 8)
+      local found = u32(row, 0)
+      if found == key then return u32(row, 4) end
+      if found == empty then return nil end
+    end
+    return nil
+  end
+
+  -- Verified VehicleShuttleComponent manager reference in current game code.
+  -- Refuse to guess its layout on a different build.
+  assert(read(base + 0x71e76a, 7) == "\x48\x8b\x3d\xe7\x7e\xc0\x02",
+         "unsupported VehicleShuttleComponent layout")
+  local function extraction_seat(entity)
+    if not entity or entity == 0 or entity == 0xffffffff then return false end
+    local shuttle = global(0x3326658)
+    if not shuttle then return false end
+    local count = u32(read(shuttle + 0x1c, 4), 0)
+    if not count or count == 0 or count > 64 then return false end
+    local index = lookup(shuttle + 0x30, entity)
+    if not index or index >= count then return false end
+    local rows = pointer(read(shuttle + 0x48, 8), 0)
+    local descriptor = rows and pointer(read(rows + index * 8, 8), 0) or nil
+    return descriptor ~= nil and u32(read(descriptor + 8, 4), 0) == entity
+  end
+
+  -- Independent read-only detector using researched native mission boundaries.
+  -- These instruction guards prove the offsets for the supported build.
+  assert(read(base + 5510146, 7) == "\x48\x8b\x05\x37\x4f\xde\x02" and
+         read(base + 5510153, 7) == "\x83\xb8\x1c\xc2\x0a\x00\x04" and
+         read(base + 9389360, 7) == "\x4c\x8b\x0d\x69\x21\xa3\x02",
+         "unsupported native mission boundary layout")
+  local function mission_status()
+    local game = global(53633856)
+    local phase = game and u32(read(game + 705052, 4), 0) or nil
+    if not phase or phase > 8 then return nil end
+    if phase ~= 4 then return { in_mission = false, phase = phase } end
+    local mode = global(53634720)
+    local count = mode and u32(read(mode + 8, 4), 0) or nil
+    -- A missing mode during a transition is not a confirmed mission end.
+    if count ~= 1 then return nil end
+    local descriptor = pointer(read(mode + 56, 8), 0)
+    local identity = descriptor and u32(read(descriptor + 8, 4), 0) or nil
+    if identity == 0 or identity == 0xffffffff then identity = nil end
+    return { in_mission = true, phase = phase, identity = identity }
+  end
+
+  local function snapshot()
+    local players, owner, health = global(53634152), global(54968216), global(53634696)
+    local seater = global(53636472)
+    local hud = global(54973752)
+    if not players or not owner or not health or not seater or not hud then return nil end
+    local seats = u32(read(players + 132, 4), 0)
+    if not seats or seats < 1 or seats > 4 then return nil end
+    local alive, local_entity = 0, nil
+    local health_rows = pointer(read(health + 4184, 8), 0)
+    if not health_rows then return nil end
+    for seat = 0, seats - 1 do
+      local unit = u32(read(players + 936 + seat * 32, 4), 0)
+      local ei = unit and lookup(owner + 15871688, unit) or nil
+      local erow = ei and read(owner + 15937304 + ei * 24, 24) or nil
+      local entity = u32(erow, 8)
+      if seat == 0 then local_entity = entity end
+      local hi = entity and lookup(health + 4144, entity) or nil
+      local hp = hi and u32(read(health_rows + hi * 440 + 20, 4), 0) or nil
+      if hp and hp > 0 and hp < 0x80000000 then alive = alive + 1 end
+    end
+    local mission = hud + 2417472
+    local gate = u32(read(mission + 2225584, 4), 0)
+    local tickets_a = u32(read(mission + 0x1494d0, 4), 0)
+    local tickets_b = u32(read(mission + 0x149b8c, 4), 0)
+    if gate == nil or tickets_a == nil or tickets_b == nil or
+       tickets_a ~= tickets_b or tickets_a > 24 then return nil end
+    local seated = false
+    local si = local_entity and lookup(seater + 32, local_entity) or nil
+    local seater_rows = pointer(read(seater + 72, 8), 0)
+    local seat_on = si and seater_rows and u32(read(seater_rows + si * 64, 4), 0) or nil
+    if seat_on and seat_on ~= 0 and seat_on ~= 0xffffffff then seated = true end
+    return { mission_active = gate ~= 0, alive_players = alive,
+             reinforcements = tickets_a, seats = seats, seated = seated,
+             seat_on = seat_on, extraction_seated = seated and extraction_seat(seat_on) }
+  end
+
+  local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  local reverse = {}
+  for index = 1, #alphabet do reverse[alphabet:byte(index)] = index - 1 end
+  local function decode64(parts)
+    local out, bytes, count = {}, {}, 0
+    for _, text in ipairs(parts) do
+      for index = 1, #text, 4 do
+        local a = reverse[text:byte(index)] or 0
+        local b = reverse[text:byte(index + 1)] or 0
+        local cchar, dchar = text:byte(index + 2), text:byte(index + 3)
+        local c, d = reverse[cchar] or 0, reverse[dchar] or 0
+        count = count + 1; bytes[count] = string.char(a * 4 + math.floor(b / 16))
+        if cchar ~= 61 then
+          count = count + 1; bytes[count] = string.char((b % 16) * 16 + math.floor(c / 4))
+        end
+        if dchar ~= 61 then
+          count = count + 1; bytes[count] = string.char((c % 4) * 64 + d)
+        end
+        if count >= 4096 then out[#out + 1] = table.concat(bytes); bytes, count = {}, 0 end
+      end
+    end
+    if count > 0 then out[#out + 1] = table.concat(bytes) end
+    return table.concat(out)
+  end
+  local audio64 = {
+__AUDIO_BASE64__
+  }
+  local env = ffi.new("char[32768]")
+  local n = kernel.GetEnvironmentVariableA("LOCALAPPDATA", env, 32768)
+  assert(n > 0 and n < 32768, "LOCALAPPDATA unavailable")
+  local root = ffi.string(env, n) .. "\\CowboyBingus\\Helldivers2"
+  local folder = root .. "\\RainieLove"
+  kernel.CreateDirectoryA(root, nil); kernel.CreateDirectoryA(folder, nil)
+  local path = folder .. "\\rainie_love.mp3"
+  local existing = io.open(path, "rb")
+  local size = existing and existing:seek("end") or nil
+  if existing then existing:close() end
+  if size ~= 6319567 then
+    local file = assert(io.open(path, "wb"), "cannot create bundled audio")
+    assert(file:write(decode64(audio64))); file:close()
+  end
+  audio64 = nil
+
+  local function wide(text)
+    local out = ffi.new("wchar_t[?]", #text + 1)
+    for index = 1, #text do out[index - 1] = text:byte(index) end
+    return out
+  end
+  local function command(text)
+    return tonumber(winmm.mciSendStringW(wide(text), nil, 0, nil)) == 0
+  end
+  local alias, opened, playing, volume, wanted = "rainie_love_hd2", false, false, 0, 0
+  local target_volume = 500
+  local fade_rate = target_volume
+  local fade_out_seconds = 1
+  local active = false
+  local sent_volume = 0
+  local primed = false
+  local audio = {}
+  local function ensure_open()
+    if not opened then
+      opened = command('open "' .. path .. '" type mpegvideo alias ' .. alias)
+      if not opened then return false end
+      command("setaudio " .. alias .. " volume to 0")
+    end
+    return true
+  end
+  function audio.prepare()
+    -- Warm the MCI decoder once, then pause it. Resume is cheap at the trigger
+    -- point and pausing avoids a permanent silent decoder stream.
+    if not ensure_open() then return false end
+    if command("play " .. alias .. " repeat") then
+      primed = command("pause " .. alias)
+      playing = not primed
+    end
+    return primed or playing
+  end
+  function audio.set_volume(percent)
+    if type(percent) ~= "number" then return end
+    percent = math.max(0, math.min(100, percent))
+    target_volume = math.floor(percent * 10 + 0.5)
+    if active then
+      wanted = target_volume
+      fade_rate = math.max(1, math.abs(wanted - volume))
+    end
+  end
+  function audio.set_fade_out(seconds)
+    if type(seconds) ~= "number" then return end
+    fade_out_seconds = math.max(1, math.min(30, math.floor(seconds + 0.5)))
+  end
+  function audio.fade_in()
+    if not ensure_open() then return false end
+    active = true
+    if not playing then
+      playing = primed and command("resume " .. alias) or false
+      if not playing then playing = command("play " .. alias .. " repeat") end
+    end
+    wanted = target_volume
+    fade_rate = math.max(1, math.abs(wanted - volume))
+    return playing
+  end
+  function audio.fade_out()
+    active = false
+    wanted = 0
+    fade_rate = math.max(0.001, math.abs(volume) / fade_out_seconds)
+  end
+  function audio.update(dt)
+    if not opened then return end
+    local step = fade_rate * math.max(0, math.min(dt or 0, 1))
+    if volume < wanted then volume = math.min(wanted, volume + step)
+    elseif volume > wanted then volume = math.max(wanted, volume - step) end
+    local output = math.floor(volume + 0.5)
+    if output ~= sent_volume then
+      command(string.format("setaudio %s volume to %d", alias, output))
+      sent_volume = output
+    end
+    if volume == 0 and wanted == 0 and playing and not active then
+      primed = command("pause " .. alias)
+      playing = not primed
+    end
+  end
+  function audio.close()
+    if opened then command("close " .. alias) end
+    opened, playing, volume, wanted, active, sent_volume, primed = false, false, 0, 0, false, 0, false
+  end
+  return { snapshot = snapshot, mission_status = mission_status, audio = audio }
+end)
+
+if not ok then M.reason = tostring(runtime); report("disabled=" .. string.format("%q", M.reason)); return M end
+M.active = true
+local primed = runtime.audio.prepare()
+report("started version=" .. M.version .. " fade_in=1s default_fade_out=1s default_volume=50% primed=" .. tostring(primed))
+local elapsed, armed, last_report = 0, 0, ""
+local extraction_locked, budget_activated = false, false
+local options_registered = false
+local option_id = "c09nat.rainie_love.volume"
+local fade_out_id = "c09nat.rainie_love.fade_out_seconds"
+local preview_id = "c09nat.rainie_love.preview"
+local preview_enabled = false
+local function connect_options()
+  if options_registered then return end
+  local api = rawget(_G, "ModOptionsMenu")
+  if type(api) ~= "table" or type(api.register_option) ~= "function" or
+     type(api.get) ~= "function" then return end
+  local registered, reason = api.register_option(option_id, {
+    type = "slider", label = "Music Volume", mod = "RAINIE LOVE",
+    min = 0, max = 100, step = 5, default = 50,
+    description = "Volume for Rainie Love when the last-stand condition is active."
+  })
+  if not registered then report("options_unavailable=" .. tostring(reason)); return end
+  local fade_registered, fade_reason = api.register_option(fade_out_id, {
+    type = "slider", label = "Fade-out Time (Seconds)", mod = "RAINIE LOVE",
+    min = 1, max = 30, step = 1, default = 1,
+    description = "Seconds used to fade the music out. Available range: 1-30."
+  })
+  if not fade_registered then
+    report("fade_option_unavailable=" .. tostring(fade_reason)); return
+  end
+  local preview_registered, preview_reason = api.register_option(preview_id, {
+    type = "toggle", label = "Preview Music", mod = "RAINIE LOVE",
+    default = false,
+    description = "Play Rainie Love now to preview the selected volume."
+  })
+  if not preview_registered then
+    report("preview_option_unavailable=" .. tostring(preview_reason)); return
+  end
+  options_registered = true
+  runtime.audio.set_volume(api.get(option_id))
+  runtime.audio.set_fade_out(api.get(fade_out_id))
+  -- Preview is deliberately session-only: never start music automatically
+  -- on the next launch merely because the game previously closed while ON.
+  preview_enabled = false
+  if type(api.set) == "function" then api.set(preview_id, false) end
+  if type(api.on_change) == "function" then
+    api.on_change(option_id, function(value)
+      runtime.audio.set_volume(value)
+      report("volume=" .. tostring(value) .. "%")
+    end)
+    api.on_change(fade_out_id, function(value)
+      runtime.audio.set_fade_out(value)
+      report("fade_out_seconds=" .. tostring(value))
+    end)
+    api.on_change(preview_id, function(value)
+      preview_enabled = value == true
+      report("preview=" .. tostring(preview_enabled))
+    end)
+  end
+  report("options_registered volume=" .. tostring(api.get(option_id)) ..
+         "% fade_out=" .. tostring(api.get(fade_out_id)) .. "s")
+end
+rawset(_G, "update", function(dt, ...)
+  local result = { n = 0 }
+  local function save(...) result = { n = select("#", ...), ... } end
+  save(old_update(dt, ...))
+  local frame = type(dt) == "number" and dt > 0 and dt < 1 and dt or 1 / 60
+  connect_options()
+  elapsed = elapsed + frame
+  if elapsed >= 0.25 then
+    elapsed = elapsed - 0.25
+    local status_ok, mission = pcall(runtime.mission_status)
+    if not status_ok then report("mission_status_error=" .. tostring(mission)); mission = nil end
+    local transition = MissionBoundary.observe(boundary, mission)
+    if transition == "started" then
+      extraction_locked, budget_activated = false, false
+      armed = 0
+      report("native_mission_started identity=" .. tostring(mission.identity))
+    elseif transition == "ended" then
+      extraction_locked, budget_activated = true, false
+      armed, preview_enabled = 0, false
+      local api = rawget(_G, "ModOptionsMenu")
+      if type(api) == "table" and type(api.set) == "function" then api.set(preview_id, false) end
+      report("native_mission_ended phase=" .. tostring(mission.phase))
+    end
+    local sampled, state = pcall(runtime.snapshot)
+    if not sampled then
+      report("snapshot_error=" .. tostring(state))
+      state = nil
+    end
+    if state then
+      if not state.mission_active or not boundary.active then
+        budget_activated = false
+      elseif state.reinforcements > 0 then
+        budget_activated = true
+      elseif state.seats > 1 then
+        -- A zero-ticket state first observed in a populated squad is treated
+        -- as joining an ordinary battle already in progress. Solo Commando
+        -- missions remain disarmed until a reinforcement cache is obtained.
+        budget_activated = true
+      end
+      -- Generic seating includes tanks, mechs and FRVs. Only a seat target
+      -- with VehicleShuttleComponent may lock extraction, even before the
+      -- game forcibly zeros the reinforcement counter during boarding.
+      if state.mission_active and state.extraction_seated then
+        if not extraction_locked then report("extraction_lock") end
+        extraction_locked = true
+      end
+    end
+    local wanted = preview_enabled or
+                   (state and boundary.active and mission and mission.in_mission and
+                    budget_activated and not extraction_locked and state.mission_active and
+                    state.alive_players == 1 and state.reinforcements == 0)
+    if wanted then armed = armed + 0.25 else armed = 0 end
+    wanted = wanted and armed >= 1
+    if wanted and not M.playing then
+      if runtime.audio.fade_in() then M.playing = true; report("fade_in") end
+    elseif not wanted and M.playing then
+      runtime.audio.fade_out(); M.playing = false; report("fade_out")
+    end
+    if state then
+      local text = string.format("mission=%s alive=%d/%d reinforcements=%d budget_ready=%s seated=%s lock=%s seat_on=%s extraction_seated=%s",
+        tostring(state.mission_active), state.alive_players, state.seats, state.reinforcements,
+        tostring(budget_activated), tostring(state.seated), tostring(extraction_locked), tostring(state.seat_on), tostring(state.extraction_seated))
+      if text ~= last_report then report(text); last_report = text end
+    end
+  end
+  runtime.audio.update(frame)
+  return unpack(result, 1, result.n)
+end)
+rawset(_G, "shutdown", function(...)
+  M.active, M.playing = false, false
+  runtime.audio.close(); report("shutdown")
+  if log then pcall(function() log:close() end); log = nil end
+  if type(old_shutdown) == "function" then return old_shutdown(...) end
+end)
+return M
