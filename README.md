@@ -1,6 +1,17 @@
 # 增援耗尽自动播放雨爱
 
-Rainie Love on Reinforcement Depletion · 当前正式版 **v0.2.9**
+MDL3 正式版 **v0.3.0**：安装及四项设置见 [MDL_RELEASE_README.md](MDL_RELEASE_README.md)。支持每次触发从头播放、无限循环试听、实时音量、可调淡出及自动开关。管理器包通过 `tools/build_mdl_release.py --audio PATH --ffmpeg PATH` 构建。下文保留原 BSL v0.2.9 说明，两版不要同时启用。
+
+MDL 版从源码构建需要 Python 3.10+、FFmpeg 和 `lupa`（Lua 5.1 离线检查），以及用户自行提供的原版音频：
+
+```powershell
+python -B tools/build_mdl_release.py --audio "D:/Audio/雨爱DJ.mp3" --ffmpeg "D:/Tools/ffmpeg.exe"
+```
+
+输出到 `release/`，音频、安装包和本地诊断文件均不提交 Git。MDL 正式入口为 `src/rainie_love_mdl.lua.in`，通过 `mdl_data.lua`、`mdl_policy.lua`、`mdl_audio.lua` 读取 Hub、判断条件并播放；`ms_adpcm.py` 为独立音频编码实现。验证可运行 `python -B tools/check_mdl.py`。
+
+
+以下为原 BSL 版 **v0.2.9** 的使用及开发说明。
 
 《绝地潜兵 2》本地音乐 Mod：在任务中增援为零且仅剩一名潜兵存活时，淡入并循环播放 Rainie Love。增援恢复、存活人数变化、登上撤离运输船或对局结束时淡出。
 

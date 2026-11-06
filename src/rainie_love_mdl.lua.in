@@ -1,0 +1,206 @@
+local Policy = (function()
+__MDL_POLICY__
+end)()
+local Data = (function()
+__MDL_DATA__
+end)()
+local Audio = (function()
+__MDL_AUDIO__
+end)()
+local format = '__AUDIO_FORMAT__'
+local content = '__AUDIO_CONTENT__'
+local state, audio, context
+local clock, next_sample = 0, 0
+local last_hub, last_audio_status
+local wanted, preview, preview_reported = false, false, false
+local volume, fade_out = 50, 1
+local active, automatic = false, true
+local subscriptions, event_retry = {}, 0
+local function unsubscribe()
+    for _, subscription in pairs(subscriptions) do
+        if type(subscription) == 'table' and type(subscription.unsubscribe) == 'function' then
+            pcall(subscription.unsubscribe, subscription)
+        end
+    end
+    subscriptions = {}
+end
+local slider_api
+local slider_retry = 0
+local slider_ids = {volume = 'rainie_love_mdl.volume', fade_out = 'rainie_love_mdl.fade_out_seconds'}
+local function report(message)
+    if context and type(context.log) == 'function' then
+        context.log('[RainieLove-MDL] ' .. message)
+    else
+        print('[RainieLove-MDL] ' .. message)
+    end
+    pcall(function()
+        local root = os.getenv('LOCALAPPDATA')
+        if not root then return end
+        local file = io.open(root .. '/MDL/Helldivers2/Logs/RainieLove-MDL.log', 'a')
+        if file then file:write(string.format('%.3f %s\n', clock, message)); file:close() end
+    end)
+end
+local function connect_sliders(ctx)
+    slider_retry = clock + 5
+    slider_api = nil
+    local api = rawget(_G, 'ModOptionsMenu')
+    if type(api) ~= 'table' or type(api.register_option) ~= 'function' or type(api.get) ~= 'function' then
+        report('SLIDERS_UNAVAILABLE ModOptionsMenu_API_missing=true')
+        return
+    end
+    local specifications = {
+        {key = 'volume', label = '音乐音量（%）', min = 0, max = 100, step = 5, default = 50,
+         description = '0–100%，实时调整并保留播放位置。'},
+        {key = 'fade_out', label = '淡出时间（秒）', min = 1, max = 30, step = 1, default = 1,
+         description = '条件结束后淡出，下次触发从歌曲开头播放。'}
+    }
+    for _, specification in ipairs(specifications) do
+        local option = {type = 'slider', label = specification.label, mod = '增援耗尽自动播放雨爱',
+            mod_id = ctx and ctx.id or 'rainie_love_mdl', description = specification.description,
+            min = specification.min, max = specification.max, step = specification.step, default = specification.default}
+        local ok, registered, reason = pcall(api.register_option, slider_ids[specification.key], option)
+        if not ok or registered ~= true then
+            report('SLIDER_REGISTER_FAILED ' .. specification.key .. ' ' .. tostring(ok and reason or registered))
+            return
+        end
+    end
+    slider_api = api
+    local values = ctx and ctx.settings
+    if type(values) == 'table' and not values.mdl_sliders_migrated and type(api.set) == 'function' then
+        for _, specification in ipairs(specifications) do
+            local value = values[specification.key]
+            if type(value) == 'number' and value == value and value >= specification.min and value <= specification.max then
+                api.set(slider_ids[specification.key], value)
+            end
+        end
+        values.mdl_sliders_migrated = true
+    end
+    report('SLIDERS_READY volume=0..100/5 fade_out=1..30/1')
+end
+local function set_preview(value)
+    if preview ~= value then
+        preview, preview_reported = value, false
+        report('PREVIEW ' .. tostring(value))
+    end
+    if context and type(context.settings) == 'table' then context.settings.preview = value end
+end
+local function settings(ctx)
+    local values = ctx and ctx.settings or {}
+    if slider_api then
+        for key, id in pairs(slider_ids) do
+            local ok, value = pcall(slider_api.get, id)
+            if ok and type(value) == 'number' then values[key] = value end
+        end
+    end
+    automatic = values.automatic ~= false
+    local next_volume = tonumber(values.volume) or 50
+    if next_volume ~= next_volume or math.abs(next_volume) == math.huge then next_volume = 50 end
+    next_volume = math.max(0, math.min(100, next_volume))
+    volume = next_volume
+    local value = tonumber(values.fade_out) or 1
+    if value ~= value or math.abs(value) == math.huge then value = 1 end
+    fade_out = math.max(1, math.min(30, value))
+end
+local function close()
+    active, wanted = false, false
+    unsubscribe()
+    if audio then audio.close(); audio = nil end
+    set_preview(false)
+    last_hub, state = nil, Policy.new()
+    slider_api = nil
+end
+local function sample()
+    local hub = rawget(_G, 'HD2Data')
+    if hub ~= last_hub then
+        unsubscribe()
+        last_hub, state, event_retry = hub, Policy.new(), 0
+        wanted = false
+        report('HUB_CHANGED reset_policy=true')
+    end
+    local ending_subscription = subscriptions.ended
+    if type(ending_subscription) == 'table' and type(ending_subscription.active) == 'function' then
+        local ok, enabled = pcall(ending_subscription.active, ending_subscription)
+        if not ok or enabled == false then unsubscribe() end
+    end
+    if type(hub) == 'table' and type(hub.on) == 'function' and not subscriptions.ended and clock >= event_retry then
+        event_retry = clock + 5
+        local ok, subscription = pcall(hub.on, 'mission_ended', function(event)
+            if not active or hub ~= last_hub then return end
+            local epoch = type(event) == 'table' and event.mission or nil
+            if Policy.finish(state, epoch) then
+                if wanted then report('AUTO_STOP reason=MISSION_ENDED_EVENT') end
+                wanted = false
+                set_preview(false)
+                report('MISSION_ENDED_EVENT epoch=' .. tostring(epoch))
+            end
+        end, {owner = 'rainie_love_mdl', id = 'mission_end'})
+        if ok and type(subscription) == 'table' then subscriptions.ended = subscription
+        else report('MISSION_EVENT_UNAVAILABLE polling_fallback=true') end
+    end
+    local mission, snapshot, reason = Data.sample(hub)
+    local policy_reason
+    local was_active = state.active
+    local previous = wanted
+    local condition
+    condition, policy_reason = Policy.observe(state, mission, snapshot, 0.25)
+    wanted = automatic and condition
+    if not automatic then policy_reason = 'AUTOMATIC_DISABLED' end
+    if wanted ~= previous then
+        report((wanted and 'AUTO_START' or 'AUTO_STOP') .. ' reason=' .. tostring(policy_reason))
+    end
+    if was_active and not state.active then set_preview(false) end
+
+end
+return {
+    name = '增援耗尽自动播放雨爱',
+    version = '0.3.0',
+    author = '2375120981',
+    description = '增援耗尽且仅剩一人存活时播放雨爱，每次触发从头开始。',
+    options = {
+        {key = 'preview', type = 'toggle', label = '试听', default = false},
+        {key = 'automatic', type = 'toggle', label = '自动播放', default = true}
+    },
+    on_enable = function(ctx)
+        close()
+        context, clock, next_sample = ctx, 0, 0
+        last_audio_status = nil
+        connect_sliders(ctx)
+        settings(ctx)
+        set_preview(false)
+        audio = Audio.new(format, content, report)
+        active = true
+        if ctx and type(ctx.on_cleanup) == 'function' then ctx.on_cleanup(close) end
+        report('ENABLE v0.3.0 no_ffi=true no_global_hooks=true')
+    end,
+    on_setting = function(ctx, key, value)
+        settings(ctx)
+        if key == 'automatic' then
+            automatic = value ~= false
+            if ctx and ctx.settings then ctx.settings.automatic = automatic end
+            if not automatic then
+                if wanted then report('AUTO_STOP reason=AUTOMATIC_DISABLED') end
+                wanted = false
+            end
+        end
+        if key == 'preview' then set_preview(value == true) end
+
+    end,
+    on_update = function(ctx, dt)
+        if not active then return end
+        local seconds = tonumber(dt) or 0
+        if seconds ~= seconds or seconds < 0 then seconds = 0 end
+        seconds = math.min(seconds, 0.25)
+        clock = clock + seconds
+        if clock >= slider_retry and rawget(_G, 'ModOptionsMenu') ~= slider_api and type(rawget(_G, 'ModOptionsMenu')) == 'table' then connect_sliders(ctx) end
+        settings(ctx)
+        if clock >= next_sample then next_sample = clock + 0.25; sample() end
+        local status = audio.update(seconds, wanted or preview, volume, fade_out)
+        if preview and status:sub(1, 12) == 'AUDIO_FAILED' then set_preview(false) end
+        if preview and not preview_reported and status == 'AUDIO_PLAYING' then
+            preview_reported = true
+            report('PREVIEW_PLAYING loop=true')
+        end
+        if status ~= last_audio_status then last_audio_status = status; report(status) end
+    end,
+    on_disable = function() close(); report('DISABLE') end
+}

@@ -11,6 +11,7 @@ __pycache__/
 .venv/
 .env
 .env.*
+/.work/
 
 # Third-party research checkouts, private logs and captured process memory.
 /research/
@@ -25,3 +26,17 @@ __pycache__/
 /tests/test_state_machine.lua
 /tools/build_probe.py
 /tools/inspect_vehicle_seat.py
+
+# Local MDL migration notes and retired probes; not part of the release source.
+/MDL_DEV43_PORT_ASSESSMENT.md
+/MDL_HUB_INTERFACE_REQUEST.md
+/MDL_TESTING.md
+/MDL_TEST_RESULTS.md
+/src/mdl_audio_status.lua
+/src/mdl_capture.lua
+/src/mdl_counter_status.lua
+/src/mdl_hub_status.lua
+/src/mdl_probe.lua
+/tests/test_mdl_capture.lua
+/tools/audit_hub.py
+/tools/check_xaudio_format.py
