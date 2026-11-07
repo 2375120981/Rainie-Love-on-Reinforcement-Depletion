@@ -160,7 +160,8 @@ def main():
         SLIDER_SPECS, SLIDER_VALUES = {}, {}
         ModOptionsMenu = {
             register_option = function(id, specification)
-                assert(specification.type == 'slider')
+                assert(specification.type == 'slider' or specification.type == 'toggle')
+                if id == FAIL_OPTION then return false end
                 SLIDER_SPECS[id] = specification
                 if SLIDER_VALUES[id] == nil then SLIDER_VALUES[id] = specification.default end
                 return true
@@ -169,12 +170,15 @@ def main():
             set = function(id, value) SLIDER_VALUES[id] = value; return true end
         }
     ''')
+    context.settings.automatic = False
     context.settings.volume = 60
     context.id = 'rainie_love_mdl'
     definition.on_enable(context)
     values = runtime.globals().SLIDER_VALUES
     specifications = runtime.globals().SLIDER_SPECS
     assert values['rainie_love_mdl.volume'] == 60
+    assert values['rainie_love_mdl.automatic'] is False, 'saved off state must migrate'
+    assert values['rainie_love_mdl.preview'] is False, 'preview must reset on enable'
     assert specifications['rainie_love_mdl.fade_out_seconds'].min == 1
     assert specifications['rainie_love_mdl.fade_out_seconds'].max == 30
     assert specifications['rainie_love_mdl.volume'].step == 5
@@ -186,14 +190,48 @@ def main():
     definition.on_enable(context)
     assert values['rainie_love_mdl.volume'] == 80
     definition.on_disable()
-    assert set(specifications.keys()) == {'rainie_love_mdl.volume', 'rainie_love_mdl.fade_out_seconds'}
-    assert {option.key for option in definition.options.values()} == {'preview', 'automatic'}
+    assert set(specifications.keys()) == {'rainie_love_mdl.volume', 'rainie_love_mdl.fade_out_seconds', 'rainie_love_mdl.preview', 'rainie_love_mdl.automatic'}
+    assert not list(definition.options.values()), 'public controls must not be duplicated in native options'
+    assert all(spec.mod_id == 'rainie_love_mdl' for spec in specifications.values())
     assert len(list(specifications.keys())) + len(list(definition.options.values())) == 4, 'release must expose exactly four settings'
     for option in definition.options.values():
         assert option.type != 'number', 'numeric settings must not remain as number inputs'
+    # Changes made in either public settings entry apply without native callbacks.
+    definition.on_enable(context)
+    values['rainie_love_mdl.preview'] = True
+    for _ in range(8):
+        definition.on_update(context, 0.25)
+    assert context.settings.preview and runtime.globals().TEST_FREE == 0, 'public preview toggle ignored'
+    values['rainie_love_mdl.preview'] = False
+    for _ in range(8):
+        definition.on_update(context, 0.25)
+    assert not context.settings.preview and runtime.globals().TEST_FREE == 1, 'public preview off ignored'
+    values['rainie_love_mdl.automatic'] = True
+    definition.on_update(context, 0.25)
+    assert context.settings.automatic is True
+    definition.on_disable()
+    # Reset public preview on disable and retain saved automatic across enable.
+    values['rainie_love_mdl.preview'] = True
+    context.settings.automatic = False
+    definition.on_enable(context)
+    assert values['rainie_love_mdl.preview'] is False
+    assert context.settings.automatic is True, 'stale legacy value overwrote public toggle'
+    values['rainie_love_mdl.preview'] = True
+    definition.on_update(context, 0.25)
+    definition.on_disable()
+    assert values['rainie_love_mdl.preview'] is False
+    # A failed control alone gets a native fallback; retry removes duplicates.
+    runtime.globals().FAIL_OPTION = 'rainie_love_mdl.automatic'
+    definition.on_enable(context)
+    assert {option.key for option in definition.options.values()} == {'automatic'}
+    runtime.globals().FAIL_OPTION = None
+    for _ in range(21):
+        definition.on_update(context, 0.25)
+    assert not list(definition.options.values())
+    definition.on_disable()
     assert runtime.globals().update is None and runtime.globals().shutdown is None
     print('PASS: Lua 5.1 entry, delayed-ready preview, ship preview, unlimited looping preview and manual stop, reload cleanup')
-    print('PASS: all numeric settings are sliders, value migration, saved values, live polling')
+    print('PASS: four unified public options, fallback/retry, migration, saved values and live preview/automatic polling')
     print('PASS: full entry automatic switch, mission end event, stale snapshot lock, new task reset, subscription cleanup')
     print('PASS: complete entry uses Hub availability, variable cooldown, playback and recovery stop')
 

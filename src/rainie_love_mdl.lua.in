@@ -24,9 +24,10 @@ local function unsubscribe()
     end
     subscriptions = {}
 end
-local slider_api
-local slider_retry = 0
-local slider_ids = {volume = 'rainie_love_mdl.volume', fade_out = 'rainie_love_mdl.fade_out_seconds'}
+local option_api, definition
+local option_retry, registered = 0, {}
+local option_ids = {volume = 'rainie_love_mdl.volume', fade_out = 'rainie_love_mdl.fade_out_seconds',
+    preview = 'rainie_love_mdl.preview', automatic = 'rainie_love_mdl.automatic'}
 local function report(message)
     if context and type(context.log) == 'function' then
         context.log('[RainieLove-MDL] ' .. message)
@@ -40,42 +41,60 @@ local function report(message)
         if file then file:write(string.format('%.3f %s\n', clock, message)); file:close() end
     end)
 end
-local function connect_sliders(ctx)
-    slider_retry = clock + 5
-    slider_api = nil
+local function option_call(fn, ...)
+    if type(fn) ~= 'function' then return nil end
+    local ok, value = pcall(fn, ...)
+    if ok then return value end
+end
+local function connect_options(ctx)
+    option_retry = clock + 5
+    option_api, registered = nil, {}
     local api = rawget(_G, 'ModOptionsMenu')
-    if type(api) ~= 'table' or type(api.register_option) ~= 'function' or type(api.get) ~= 'function' then
-        report('SLIDERS_UNAVAILABLE ModOptionsMenu_API_missing=true')
-        return
-    end
+    if type(api) == 'table' and type(api.register_option) == 'function'
+        and type(api.get) == 'function' and type(api.set) == 'function' then option_api = api end
     local specifications = {
-        {key = 'volume', label = '音乐音量（%）', min = 0, max = 100, step = 5, default = 50,
+        {key = 'preview', type = 'toggle', label = '试听', default = false,
+         description = '启用或重新加载模组后需等待音频准备，当前实测约 80–90 秒。保持试听开启，准备完成后自动循环播放；关闭后淡出。'},
+        {key = 'volume', type = 'slider', label = '音乐音量（%）', min = 0, max = 100, step = 5, default = 50,
          description = '0–100%，实时调整并保留播放位置。'},
-        {key = 'fade_out', label = '淡出时间（秒）', min = 1, max = 30, step = 1, default = 1,
-         description = '条件结束后淡出，下次触发从歌曲开头播放。'}
+        {key = 'fade_out', type = 'slider', label = '淡出时间（秒）', min = 1, max = 30, step = 1, default = 1,
+         description = '条件结束后淡出，下次触发从歌曲开头播放。'},
+        {key = 'automatic', type = 'toggle', label = '自动播放', default = true,
+         description = '按任务条件自动播放，与手动试听独立。'}
     }
-    for _, specification in ipairs(specifications) do
-        local option = {type = 'slider', label = specification.label, mod = '增援耗尽自动播放雨爱',
-            mod_id = ctx and ctx.id or 'rainie_love_mdl', description = specification.description,
-            min = specification.min, max = specification.max, step = specification.step, default = specification.default}
-        local ok, registered, reason = pcall(api.register_option, slider_ids[specification.key], option)
-        if not ok or registered ~= true then
-            report('SLIDER_REGISTER_FAILED ' .. specification.key .. ' ' .. tostring(ok and reason or registered))
-            return
-        end
-    end
-    slider_api = api
-    local values = ctx and ctx.settings
-    if type(values) == 'table' and not values.mdl_sliders_migrated and type(api.set) == 'function' then
-        for _, specification in ipairs(specifications) do
-            local value = values[specification.key]
-            if type(value) == 'number' and value == value and value >= specification.min and value <= specification.max then
-                api.set(slider_ids[specification.key], value)
+    local values = ctx and ctx.settings or {}
+    local fallback, complete = {}, true
+    local sliders_migrated, toggles_migrated = true, true
+    for _, spec in ipairs(specifications) do
+        local id = option_ids[spec.key]
+        local existing = option_api and option_call(option_api.get, id)
+        local option = {type = spec.type, label = spec.label, mod = '增援耗尽自动播放雨爱',
+            mod_id = ctx and ctx.id or 'rainie_love_mdl', description = spec.description,
+            min = spec.min, max = spec.max, step = spec.step, default = spec.default}
+        if option_api and option_call(option_api.register_option, id, option) == true then
+            registered[spec.key] = id
+            local marker = spec.type == 'slider' and 'mdl_sliders_migrated' or 'mdl_toggles_migrated'
+            local old = values[spec.key]
+            local valid = spec.type == 'toggle' and type(old) == 'boolean'
+                or spec.type == 'slider' and type(old) == 'number' and old == old and old >= spec.min and old <= spec.max
+            if not values[marker] and existing == nil and valid then
+                if option_call(option_api.set, id, old) ~= true then
+                    if spec.type == 'slider' then sliders_migrated = false else toggles_migrated = false end
+                end
             end
+        else
+            complete = false
+            if spec.type == 'slider' then sliders_migrated = false else toggles_migrated = false end
+            fallback[#fallback + 1] = {key = spec.key, type = spec.type == 'slider' and 'number' or spec.type,
+                label = spec.label, min = spec.min, max = spec.max, step = spec.step, default = spec.default}
+            report('OPTION_NATIVE_FALLBACK ' .. spec.key)
         end
-        values.mdl_sliders_migrated = true
     end
-    report('SLIDERS_READY volume=0..100/5 fade_out=1..30/1')
+    if option_api and sliders_migrated then values.mdl_sliders_migrated = true end
+    if option_api and toggles_migrated then values.mdl_toggles_migrated = true end
+    definition.options = fallback
+    -- Retry partial failures as well as an API arriving after enable.
+    if not complete then option_retry = clock + 5 else option_retry = math.huge end
 end
 local function set_preview(value)
     if preview ~= value then
@@ -83,16 +102,20 @@ local function set_preview(value)
         report('PREVIEW ' .. tostring(value))
     end
     if context and type(context.settings) == 'table' then context.settings.preview = value end
+    if option_api and registered.preview then option_call(option_api.set, registered.preview, value) end
 end
 local function settings(ctx)
     local values = ctx and ctx.settings or {}
-    if slider_api then
-        for key, id in pairs(slider_ids) do
-            local ok, value = pcall(slider_api.get, id)
-            if ok and type(value) == 'number' then values[key] = value end
+    if option_api then
+        for key, id in pairs(registered) do
+            local value = option_call(option_api.get, id)
+            if (key == 'preview' or key == 'automatic') and type(value) == 'boolean'
+                or (key == 'volume' or key == 'fade_out') and type(value) == 'number' then values[key] = value end
         end
     end
+    set_preview(values.preview == true)
     automatic = values.automatic ~= false
+    if not automatic then wanted = false end
     local next_volume = tonumber(values.volume) or 50
     if next_volume ~= next_volume or math.abs(next_volume) == math.huge then next_volume = 50 end
     next_volume = math.max(0, math.min(100, next_volume))
@@ -107,7 +130,7 @@ local function close()
     if audio then audio.close(); audio = nil end
     set_preview(false)
     last_hub, state = nil, Policy.new()
-    slider_api = nil
+    option_api, registered = nil, {}
 end
 local function sample()
     local hub = rawget(_G, 'HD2Data')
@@ -151,28 +174,27 @@ local function sample()
     if was_active and not state.active then set_preview(false) end
 
 end
-return {
+definition = {
     name = '增援耗尽自动播放雨爱',
-    version = '0.3.0',
+    version = '0.3.2',
     author = '2375120981',
     description = '增援耗尽且仅剩一人存活时播放雨爱，每次触发从头开始。',
-    options = {
-        {key = 'preview', type = 'toggle', label = '试听', default = false},
-        {key = 'automatic', type = 'toggle', label = '自动播放', default = true}
-    },
+    options = {},
     on_enable = function(ctx)
         close()
         context, clock, next_sample = ctx, 0, 0
         last_audio_status = nil
-        connect_sliders(ctx)
+        connect_options(ctx)
         settings(ctx)
         set_preview(false)
         audio = Audio.new(format, content, report)
         active = true
         if ctx and type(ctx.on_cleanup) == 'function' then ctx.on_cleanup(close) end
-        report('ENABLE v0.3.0 no_ffi=true no_global_hooks=true')
+        report('ENABLE v0.3.2 no_ffi=true no_global_hooks=true')
     end,
     on_setting = function(ctx, key, value)
+        if ctx and ctx.settings then ctx.settings[key] = value end
+        if option_api and registered[key] then option_call(option_api.set, registered[key], value) end
         settings(ctx)
         if key == 'automatic' then
             automatic = value ~= false
@@ -191,7 +213,7 @@ return {
         if seconds ~= seconds or seconds < 0 then seconds = 0 end
         seconds = math.min(seconds, 0.25)
         clock = clock + seconds
-        if clock >= slider_retry and rawget(_G, 'ModOptionsMenu') ~= slider_api and type(rawget(_G, 'ModOptionsMenu')) == 'table' then connect_sliders(ctx) end
+        if clock >= option_retry or (option_api and rawget(_G, 'ModOptionsMenu') ~= option_api) then connect_options(ctx) end
         settings(ctx)
         if clock >= next_sample then next_sample = clock + 0.25; sample() end
         local status = audio.update(seconds, wanted or preview, volume, fade_out)
@@ -204,3 +226,5 @@ return {
     end,
     on_disable = function() close(); report('DISABLE') end
 }
+
+return definition

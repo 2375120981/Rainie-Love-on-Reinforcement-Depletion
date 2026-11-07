@@ -70,7 +70,7 @@ def main():
     entry = args.output_dir / 'mod.lua'
     entry.write_text(source, encoding='utf-8', newline='\n')
     report = {
-        'version': '0.3.0', 'kind': 'MDL source staging',
+        'version': '0.3.2', 'kind': 'MDL source staging',
         'original_audio_sha256': audio_hash, 'audio_bytes': len(content),
         'encoding': ('MS-ADPCM, mono, 20000 Hz, 512 samples/block' if args.codec == 'adpcm' else 'PCM16, mono, 20000 Hz'),
         'original_samples': original_samples,

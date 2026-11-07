@@ -12,7 +12,7 @@ import zipfile
 from build_release import LUA_TYPE, murmur64
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.3.0'
+VERSION = '0.3.2'
 RESOURCE = 'mods/2375120981/rainie_love/main'
 PATCH = '9ba626afa44a3aa3.patch_0'
 
@@ -82,7 +82,7 @@ def main():
             'exactly four settings', 'no capture/test entry', 'archive resource and source identity',
             'manifest include mapping', 'ZIP CRC and every file identity', 'no game boot replacement'],
         'game_validation': 'mdl.11 behavior confirmed by user; release menu and unlimited preview verified offline'}
-    (args.output_dir/'Rainie-Love-on-Reinforcement-Depletion-MDL-v0.3.0.build.json').write_text(
+    (args.output_dir/'Rainie-Love-on-Reinforcement-Depletion-MDL-v0.3.2.build.json').write_text(
         json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False))
 

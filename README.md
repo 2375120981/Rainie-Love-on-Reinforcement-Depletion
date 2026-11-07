@@ -1,6 +1,6 @@
 # 增援耗尽自动播放雨爱
 
-MDL3 正式版 **v0.3.0**：安装及四项设置见 [MDL_RELEASE_README.md](MDL_RELEASE_README.md)。支持每次触发从头播放、无限循环试听、实时音量、可调淡出及自动开关。管理器包通过 `tools/build_mdl_release.py --audio PATH --ffmpeg PATH` 构建。下文保留原 BSL v0.2.9 说明，两版不要同时启用。
+MDL3 正式版 **v0.3.2**：安装及四项设置见 [MDL_RELEASE_README.md](MDL_RELEASE_README.md)。支持每次触发从头播放、无限循环试听、实时音量、可调淡出及自动开关。管理器包通过 `tools/build_mdl_release.py --audio PATH --ffmpeg PATH` 构建。下文保留原 BSL v0.2.9 说明，两版不要同时启用。
 
 MDL 版从源码构建需要 Python 3.10+、FFmpeg 和 `lupa`（Lua 5.1 离线检查），以及用户自行提供的原版音频：
 
